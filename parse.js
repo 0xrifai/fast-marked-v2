@@ -888,242 +888,261 @@ function tokenizeInline(s, refs) {
     for (let q = p - 1; q >= 0 && s[q] === '\\'; q--) b++;
     return b % 2 === 1;
   };
+  // Try a bare-email autolink starting at the current i (a word char).
+  // Returns true when one formed (i advanced past it).
+  const emailAt = () => {
+    const prevIsWord = i > 0 && s.charCodeAt(i - 1) < 128 && EMAIL_LOCAL_T[s.charCodeAt(i - 1)] === 1 && !(s[i - 1] === '_' && i >= 2 && s[i - 2] === '_');
+    if (prevIsWord) return false;
+    const atIdx = s.indexOf('@', i);
+    if (atIdx === -1 || atIdx - i >= 200) return false;
+    const mEnd = bareEmailMatchEnd(s, i);
+    if (mEnd === -1) return false;
+    let email = s.slice(i, mEnd);
+    let valid = true;
+    const trailingUnderscoreCloses = () => {
+      for (let k = nodes.length - 1; k >= 0; k--) {
+        const nd = nodes[k];
+        if (nd.t === 'delim' && nd.ch === '_') return nd.canOpen === true;
+      }
+      return false;
+    };
+    while (true) {
+      const after = s[i + email.length];
+      if (after === undefined || after === '' || !(after.charCodeAt(0) < 128 && EMAIL_DOMAIN_T[after.charCodeAt(0)] === 1)) break;
+      if (after === '_' && trailingUnderscoreCloses()) break;
+      const cut = email.lastIndexOf('.');
+      const at = email.indexOf('@');
+      if (cut <= at) { valid = false; break; }
+      email = email.slice(0, cut);
+    }
+    if (!valid || email.indexOf('.', email.indexOf('@')) === -1) return false;
+    let start = i, prefix = '';
+    if (i >= 7 && s.slice(i - 7, i) === 'mailto:') { start = i - 7; prefix = 'mailto:'; }
+    else if (i >= 5 && s.slice(i - 5, i) === 'xmpp:') { start = i - 5; prefix = 'xmpp:'; }
+    let url = email, adv = email.length;
+    if (prefix === 'xmpp:') {
+      const pathStart = i + email.length;
+      if (s[pathStart] === '/') {
+        let pe = pathStart + 1;
+        while (pe < n && (ALNUM_T[s.charCodeAt(pe)] === 1 || s[pe] === '_' || s[pe] === '@' || s[pe] === '.' || s[pe] === '-')) pe++;
+        if (pe > pathStart + 1) { url += s.slice(pathStart, pe); adv += pe - pathStart; }
+      }
+    }
+    flushText(start);
+    nodes.push({ t: 'autolink', url: prefix ? prefix + url : 'mailto:' + url, text: prefix + url, pos: start, end: i + adv });
+    i += adv; textStart = i;
+    return true;
+  };
+  // Dispatch on the character code: one table lookup instead of a long
+  // chain of string comparisons per character.
   while (i < n) {
-    const c = s[i];
-    // backslash: only ASCII punctuation can be escaped (marked's set);
-    // a backslash before anything else (e.g. «) is literal text.
-    if (c === '\\') {
-      const d = s[i + 1];
-      if (d === '\n') { flushText(i); nodes.push({ t: 'br', pos: i, end: i + 2 }); i += 2; while (i < n && (s[i] === ' ' || s[i] === '\t')) i++; textStart = i; continue; }
-      if (d !== undefined && d.charCodeAt(0) < 128 && PUNCT_T[d.charCodeAt(0)] === 1) { flushText(i); nodes.push({ t: 'text', s: d, pos: i, end: i + 2 }); i += 2; textStart = i; continue; }
-      i++;
-      continue;
-    }
-    // code span
-    if (c === '`') {
-      let j = i;
-      while (j < n && s[j] === '`') j++;
-      const run = j - i;
-      // The scan must not cross a ] that closes a bracket opened BEFORE
-      // the code span when a link would form there (marked's link regex
-      // claims that ] first). A ] closing a bracket opened inside the
-      // prospective code span does not block it. Backslashes are literal
-      // inside a code span: only \[ / \] count as escaped brackets.
-      let k = j, found = -1, fend = -1, aborted = false;
-      const baseDepth = openStack.length;
-      const scanStack = openStack.slice();
-      let preScan = baseDepth;
-      while (k < n) {
-        if (s[k] === '`') {
-          let m = k;
-          while (m < n && s[m] === '`') m++;
-          if (m - k === run) { found = k; fend = m; break; }
-          k = m;
-        } else if (s[k] === '[' && !isEscaped(k)) {
-          scanStack.push(k);
-          k++;
-        } else if (s[k] === ']' && !isEscaped(k)) {
-          if (scanStack.length > preScan) {
-            scanStack.pop();
+    const code = s.charCodeAt(i);
+    switch (code) {
+      case 92: { // backslash: only ASCII punctuation can be escaped
+        const d = s[i + 1];
+        if (d === '\n') { flushText(i); nodes.push({ t: 'br', pos: i, end: i + 2 }); i += 2; while (i < n && (s[i] === ' ' || s[i] === '\t')) i++; textStart = i; continue; }
+        if (d !== undefined && d.charCodeAt(0) < 128 && PUNCT_T[d.charCodeAt(0)] === 1) { flushText(i); nodes.push({ t: 'text', s: d, pos: i, end: i + 2 }); i += 2; textStart = i; continue; }
+        i++;
+        continue;
+      }
+      case 96: { // code span
+        let j = i;
+        while (j < n && s[j] === '`') j++;
+        const run = j - i;
+        // The scan must not cross a ] that closes a bracket opened
+        // BEFORE the code span when a link would form there (marked's
+        // link regex claims that ] first). A ] closing a bracket
+        // opened inside the prospective code span does not block it.
+        // Backslashes are literal inside a code span: only \[ / \]
+        // count as escaped brackets.
+        let k = j, found = -1, fend = -1, aborted = false;
+        const baseDepth = openStack.length;
+        const scanStack = openStack.slice();
+        let preScan = baseDepth;
+        while (k < n) {
+          if (s[k] === '`') {
+            let m = k;
+            while (m < n && s[m] === '`') m++;
+            if (m - k === run) { found = k; fend = m; break; }
+            k = m;
+          } else if (s[k] === '[' && !isEscaped(k)) {
+            scanStack.push(k);
             k++;
-          } else if (preScan > 0) {
-            const openerPos = scanStack[scanStack.length - 1];
-            const openerEnd = openerPos + (s[openerPos] === '!' ? 2 : 1);
-            const label = s.slice(openerEnd, k);
-            let forms = false;
-            if (labelTextValid(label)) {
-              const after = k + 1;
-              if (parseInlineLink(s, after)) forms = true;
-              else {
-                const rl = parseRefLabel(s, after);
-                if (rl && rl.label !== '' && shortcutLabelValid(rl.label)) {
-                  if (refs.get(normalizeLabel(rl.label))) forms = true;
-                } else if (rl && rl.label === '' && shortcutLabelValid(label)) {
-                  if (refs.get(normalizeLabel(label))) forms = true;
-                } else if (!rl && shortcutLabelValid(label)) {
-                  if (refs.get(normalizeLabel(label))) forms = true;
+          } else if (s[k] === ']' && !isEscaped(k)) {
+            if (scanStack.length > preScan) {
+              scanStack.pop();
+              k++;
+            } else if (preScan > 0) {
+              const openerPos = scanStack[scanStack.length - 1];
+              const openerEnd = openerPos + (s[openerPos] === '!' ? 2 : 1);
+              const label = s.slice(openerEnd, k);
+              let forms = false;
+              if (labelTextValid(label)) {
+                const after = k + 1;
+                if (parseInlineLink(s, after)) forms = true;
+                else {
+                  const rl = parseRefLabel(s, after);
+                  if (rl && rl.label !== '' && shortcutLabelValid(rl.label)) {
+                    if (refs.get(normalizeLabel(rl.label))) forms = true;
+                  } else if (rl && rl.label === '' && shortcutLabelValid(label)) {
+                    if (refs.get(normalizeLabel(label))) forms = true;
+                  } else if (!rl && shortcutLabelValid(label)) {
+                    if (refs.get(normalizeLabel(label))) forms = true;
+                  }
                 }
               }
-            }
-            if (forms) { aborted = true; break; }
-            scanStack.pop(); preScan--;
-            k++;
+              if (forms) { aborted = true; break; }
+              scanStack.pop(); preScan--;
+              k++;
+            } else k++;
           } else k++;
-        } else k++;
-      }
-      if (aborted) { i = j; continue; }
-      if (found !== -1) {
-        flushText(i);
-        let content = s.slice(j, found);
-        content = content.replace(/\n/g, ' ');
-        if (content.length >= 2 && content[0] === ' ' && content[content.length - 1] === ' ' && /[^ ]/.test(content)) {
-          content = content.slice(1, -1);
         }
-        nodes.push({ t: 'code', s: content, pos: i, end: fend });
-        i = fend; textStart = i; continue;
-      }
-      i = j; continue;
-    }
-    // emphasis / strikethrough delimiters
-    if (c === '*' || c === '_' || c === '~') {
-      let j = i;
-      while (j < n && s[j] === c) j++;
-      let len = j - i;
-      if (c === '~' && len >= 3) { i = j; continue; }
-      const before = i > 0 ? s[i - 1] : undefined;
-      const after = j < n ? s[j] : undefined;
-      const beforeWS = i === 0 || isWS(before);
-      const afterWS = j >= n || isWS(after);
-      const beforeP = isPunct(before);
-      const afterP = isPunct(after);
-      const leftFlank = !afterWS && (!afterP || beforeWS || beforeP);
-      const rightFlank = !beforeWS && (!beforeP || afterWS || afterP);
-      let canOpen, canClose;
-      if (c === '_') {
-        canOpen = leftFlank && (!rightFlank || beforeP);
-        canClose = rightFlank && (!leftFlank || afterP);
-      } else {
-        canOpen = leftFlank;
-        canClose = rightFlank;
-      }
-      if (c === '~' && len > 2) len = 2;
-      if (canOpen || canClose) {
-        flushText(i);
-        nodes.push({ t: 'delim', ch: c, len, canOpen, canClose, active: true, used: 0, pos: i, end: j });
-        i = j; textStart = i; continue;
-      }
-      i = j; continue;
-    }
-    // brackets / images
-    if (c === '[' || (c === '!' && s[i + 1] === '[')) {
-      const image = c === '!';
-      flushText(i);
-      nodes.push({ t: 'open', image, active: true, pos: i, end: i + (image ? 2 : 1) });
-      openStack.push(i);
-      i += image ? 2 : 1; textStart = i; continue;
-    }
-    if (c === ']') {
-      flushText(i);
-      nodes.push({ t: 'close', pos: i, end: i + 1 });
-      if (openStack.length) openStack.pop();
-      i++; textStart = i; continue;
-    }
-    // raw html / autolink <
-    if (c === '<') {
-      const e = matchHtmlTag(s, i);
-      if (e !== -1) {
-        flushText(i);
-        const tag = s.slice(i, e);
-        if (/^<a /i.test(tag)) _inLink = true;
-        else if (/^<\/a>/i.test(tag)) _inLink = false;
-        nodes.push({ t: 'html', s: tag, pos: i, end: e }); i = e; textStart = i; continue;
-      }
-      const al = angleAutolink(s, i);
-      if (al) {
-        flushText(i);
-        const raw = al.raw;
-        const url = (al.email && !raw.includes(':')) ? 'mailto:' + raw : raw;
-        nodes.push({ t: 'autolink', url, text: raw, angle: true, pos: i, end: al.end });
-        i = al.end; textStart = i; continue;
-      }
-      i++;
-      continue;
-    }
-    // hard break: 2+ spaces + newline
-    if (c === ' ') {
-      let j = i;
-      while (s[j] === ' ') j++;
-      if (j - i >= 2 && s[j] === '\n') { flushText(i); nodes.push({ t: 'br', pos: i, end: j + 1 }); i = j + 1; while (i < n && (s[i] === ' ' || s[i] === '\t')) i++; textStart = i; continue; }
-    }
-    // GFM extended autolinks: www. / scheme / email. Suppressed while
-    // _inLink is set (unclosed <a> tag).
-    if (c === 'w' && !_inLink && s.startsWith('www.', i)) {
-      const prev = i > 0 ? s[i - 1] : undefined;
-      const okPrev = prev === undefined || isWS(prev) || prev === '(' || prev === '*' || prev === '_' || prev === '~';
-      if (okPrev) {
-        const end = greedyUrl(s, i, openStack.length > 0, refs);
-        if (end > i + 4) {
-          const first = s.slice(i + 4, end);
-          if (first.length > 0 && (ALNUM_T[first.charCodeAt(0)] === 1 || first[0] === '-')) {
-            let u = trimExtendedUrl(s.slice(i, end));
-            const dc = linkDestCloseParen(s, i, refs);
-            if (dc !== -1 && i + u.length > dc) u = s.slice(i, dc);
-            if (u.length > 4) { flushText(i); nodes.push({ t: 'autolink', url: 'http://' + u, text: u, pos: i, end: i + u.length }); i += u.length; textStart = i; continue; }
+        if (aborted) { i = j; continue; }
+        if (found !== -1) {
+          flushText(i);
+          let content = s.slice(j, found);
+          content = content.replace(/\n/g, ' ');
+          if (content.length >= 2 && content[0] === ' ' && content[content.length - 1] === ' ' && /[^ ]/.test(content)) {
+            content = content.slice(1, -1);
           }
+          nodes.push({ t: 'code', s: content, pos: i, end: fend });
+          i = fend; textStart = i; continue;
         }
+        i = j; continue;
       }
-    }
-    if (!_inLink && (c === 'h' || c === 'H' || c === 'f' || c === 'F')) {
-      // http://, https:// or ftp://, case-insensitive, no allocation
-      const l0 = s.charCodeAt(i) | 32;
-      let prefixLen = 0;
-      if (l0 === 104) { // h
-        if ((s.charCodeAt(i + 1) | 32) === 116 && (s.charCodeAt(i + 2) | 32) === 116 && (s.charCodeAt(i + 3) | 32) === 112) {
-          if (s[i + 4] === ':' && s[i + 5] === '/' && s[i + 6] === '/') prefixLen = 7;
-          else if ((s.charCodeAt(i + 4) | 32) === 115 && s[i + 5] === ':' && s[i + 6] === '/' && s[i + 7] === '/') prefixLen = 8;
+      case 42: case 95: case 126: { // * _ ~ emphasis / strikethrough
+        const c = code === 42 ? '*' : code === 95 ? '_' : '~';
+        let j = i;
+        while (j < n && s[j] === c) j++;
+        let len = j - i;
+        if (c === '~' && len >= 3) { i = j; continue; }
+        const before = i > 0 ? s[i - 1] : undefined;
+        const after = j < n ? s[j] : undefined;
+        const beforeWS = i === 0 || isWS(before);
+        const afterWS = j >= n || isWS(after);
+        const beforeP = isPunct(before);
+        const afterP = isPunct(after);
+        const leftFlank = !afterWS && (!afterP || beforeWS || beforeP);
+        const rightFlank = !beforeWS && (!beforeP || afterWS || afterP);
+        let canOpen, canClose;
+        if (c === '_') {
+          canOpen = leftFlank && (!rightFlank || beforeP);
+          canClose = rightFlank && (!leftFlank || afterP);
+        } else {
+          canOpen = leftFlank;
+          canClose = rightFlank;
         }
-      } else if (l0 === 102) { // f
-        if ((s.charCodeAt(i + 1) | 32) === 116 && (s.charCodeAt(i + 2) | 32) === 112 && s[i + 3] === ':' && s[i + 4] === '/' && s[i + 5] === '/') prefixLen = 6;
-      }
-      if (prefixLen > 0) {
-        const end = greedyUrl(s, i, openStack.length > 0, refs);
-        const afterPrefix = s.slice(i + prefixLen, end);
-        if (afterPrefix.length > 0 && (ALNUM_T[afterPrefix.charCodeAt(0)] === 1 || afterPrefix[0] === '-')) {
-          let u = trimExtendedUrl(s.slice(i, end));
-          const dc = linkDestCloseParen(s, i, refs);
-          if (dc !== -1 && i + u.length > dc) u = s.slice(i, dc);
-          if (u.length > prefixLen) { flushText(i); nodes.push({ t: 'autolink', url: u, text: u, pos: i, end: i + u.length }); i += u.length; textStart = i; continue; }
+        if (c === '~' && len > 2) len = 2;
+        if (canOpen || canClose) {
+          flushText(i);
+          nodes.push({ t: 'delim', ch: c, len, canOpen, canClose, active: true, used: 0, pos: i, end: j });
+          i = j; textStart = i; continue;
         }
+        i = j; continue;
       }
-    }
-    // bare email — only try at the start of a word run
-    if (!_inLink && hasAt && s.charCodeAt(i) < 128 && EMAIL_LOCAL_T[s.charCodeAt(i)] === 1) {
-      const prevIsWord = i > 0 && s.charCodeAt(i - 1) < 128 && EMAIL_LOCAL_T[s.charCodeAt(i - 1)] === 1 && !(s[i - 1] === '_' && i >= 2 && s[i - 2] === '_');
-      if (!prevIsWord) {
-        const atIdx = s.indexOf('@', i);
-        if (atIdx !== -1 && atIdx - i < 200) {
-          const mEnd = bareEmailMatchEnd(s, i);
-          if (mEnd !== -1) {
-            let email = s.slice(i, mEnd);
-            let valid = true;
-            const trailingUnderscoreCloses = () => {
-              for (let k = nodes.length - 1; k >= 0; k--) {
-                const nd = nodes[k];
-                if (nd.t === 'delim' && nd.ch === '_') return nd.canOpen === true;
+      case 91: { // [ bracket
+        flushText(i);
+        nodes.push({ t: 'open', image: false, active: true, pos: i, end: i + 1 });
+        openStack.push(i);
+        i++; textStart = i; continue;
+      }
+      case 33: { // ! (only special as ![)
+        if (s[i + 1] === '[') {
+          flushText(i);
+          nodes.push({ t: 'open', image: true, active: true, pos: i, end: i + 2 });
+          openStack.push(i);
+          i += 2; textStart = i; continue;
+        }
+        i++;
+        continue;
+      }
+      case 93: { // ] close bracket
+        flushText(i);
+        nodes.push({ t: 'close', pos: i, end: i + 1 });
+        if (openStack.length) openStack.pop();
+        i++; textStart = i; continue;
+      }
+      case 60: { // < raw html / autolink
+        const e = matchHtmlTag(s, i);
+        if (e !== -1) {
+          flushText(i);
+          const tag = s.slice(i, e);
+          if (/^<a /i.test(tag)) _inLink = true;
+          else if (/^<\/a>/i.test(tag)) _inLink = false;
+          nodes.push({ t: 'html', s: tag, pos: i, end: e }); i = e; textStart = i; continue;
+        }
+        const al = angleAutolink(s, i);
+        if (al) {
+          flushText(i);
+          const raw = al.raw;
+          const url = (al.email && !raw.includes(':')) ? 'mailto:' + raw : raw;
+          nodes.push({ t: 'autolink', url, text: raw, angle: true, pos: i, end: al.end });
+          i = al.end; textStart = i; continue;
+        }
+        i++;
+        continue;
+      }
+      case 32: { // space: hard break is 2+ spaces + newline
+        let j = i;
+        while (s[j] === ' ') j++;
+        if (j - i >= 2 && s[j] === '\n') { flushText(i); nodes.push({ t: 'br', pos: i, end: j + 1 }); i = j + 1; while (i < n && (s[i] === ' ' || s[i] === '\t')) i++; textStart = i; continue; }
+        i++;
+        continue;
+      }
+      case 119: { // w — www. autolink
+        if (!_inLink && s.startsWith('www.', i)) {
+          const prev = i > 0 ? s[i - 1] : undefined;
+          const okPrev = prev === undefined || isWS(prev) || prev === '(' || prev === '*' || prev === '_' || prev === '~';
+          if (okPrev) {
+            const end = greedyUrl(s, i, openStack.length > 0, refs);
+            if (end > i + 4) {
+              const first = s.slice(i + 4, end);
+              if (first.length > 0 && (ALNUM_T[first.charCodeAt(0)] === 1 || first[0] === '-')) {
+                let u = trimExtendedUrl(s.slice(i, end));
+                const dc = linkDestCloseParen(s, i, refs);
+                if (dc !== -1 && i + u.length > dc) u = s.slice(i, dc);
+                if (u.length > 4) { flushText(i); nodes.push({ t: 'autolink', url: 'http://' + u, text: u, pos: i, end: i + u.length }); i += u.length; textStart = i; continue; }
               }
-              return false;
-            };
-            while (true) {
-              const after = s[i + email.length];
-              if (after === undefined || after === '' || !(after.charCodeAt(0) < 128 && EMAIL_DOMAIN_T[after.charCodeAt(0)] === 1)) break;
-              if (after === '_' && trailingUnderscoreCloses()) break;
-              const cut = email.lastIndexOf('.');
-              const at = email.indexOf('@');
-              if (cut <= at) { valid = false; break; }
-              email = email.slice(0, cut);
-            }
-            if (valid && email.indexOf('.', email.indexOf('@')) !== -1) {
-              let start = i, prefix = '';
-              if (i >= 7 && s.slice(i - 7, i) === 'mailto:') { start = i - 7; prefix = 'mailto:'; }
-              else if (i >= 5 && s.slice(i - 5, i) === 'xmpp:') { start = i - 5; prefix = 'xmpp:'; }
-              let url = email, adv = email.length;
-              if (prefix === 'xmpp:') {
-                const pathStart = i + email.length;
-                if (s[pathStart] === '/') {
-                  let pe = pathStart + 1;
-                  while (pe < n && (ALNUM_T[s.charCodeAt(pe)] === 1 || s[pe] === '_' || s[pe] === '@' || s[pe] === '.' || s[pe] === '-')) pe++;
-                  if (pe > pathStart + 1) { url += s.slice(pathStart, pe); adv += pe - pathStart; }
-                }
-              }
-              flushText(start);
-              nodes.push({ t: 'autolink', url: prefix ? prefix + url : 'mailto:' + url, text: prefix + url, pos: start, end: i + adv });
-              i += adv; textStart = i; continue;
             }
           }
         }
+        if (!_inLink && hasAt && EMAIL_LOCAL_T[code] === 1 && emailAt()) continue;
+        i++;
+        continue;
+      }
+      case 104: case 72: case 102: case 70: { // h H f F — scheme autolink
+        if (!_inLink) {
+          const l0 = code | 32;
+          let prefixLen = 0;
+          if (l0 === 104) { // h
+            if ((s.charCodeAt(i + 1) | 32) === 116 && (s.charCodeAt(i + 2) | 32) === 116 && (s.charCodeAt(i + 3) | 32) === 112) {
+              if (s[i + 4] === ':' && s[i + 5] === '/' && s[i + 6] === '/') prefixLen = 7;
+              else if ((s.charCodeAt(i + 4) | 32) === 115 && s[i + 5] === ':' && s[i + 6] === '/' && s[i + 7] === '/') prefixLen = 8;
+            }
+          } else if (l0 === 102) { // f
+            if ((s.charCodeAt(i + 1) | 32) === 116 && (s.charCodeAt(i + 2) | 32) === 112 && s[i + 3] === ':' && s[i + 4] === '/' && s[i + 5] === '/') prefixLen = 6;
+          }
+          if (prefixLen > 0) {
+            const end = greedyUrl(s, i, openStack.length > 0, refs);
+            const afterPrefix = s.slice(i + prefixLen, end);
+            if (afterPrefix.length > 0 && (ALNUM_T[afterPrefix.charCodeAt(0)] === 1 || afterPrefix[0] === '-')) {
+              let u = trimExtendedUrl(s.slice(i, end));
+              const dc = linkDestCloseParen(s, i, refs);
+              if (dc !== -1 && i + u.length > dc) u = s.slice(i, dc);
+              if (u.length > prefixLen) { flushText(i); nodes.push({ t: 'autolink', url: u, text: u, pos: i, end: i + u.length }); i += u.length; textStart = i; continue; }
+            }
+          }
+        }
+        if (!_inLink && hasAt && EMAIL_LOCAL_T[code] === 1 && emailAt()) continue;
+        i++;
+        continue;
+      }
+      default: { // ordinary char: a bare email may start here
+        if (!_inLink && hasAt && code < 128 && EMAIL_LOCAL_T[code] === 1 && emailAt()) continue;
+        i++;
+        continue;
       }
     }
-    i++;
   }
   flushText(n);
   return nodes;
