@@ -118,10 +118,15 @@ const PUNCT_SET = new Set('!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'.split(''));
 // collapsing whitespace runs to one space, trimming, lowercasing, and
 // folding ß/ẞ to ss (CommonMark + marked's case folding).
 const _normCache = new Map();
+const _normFastRe = /[\\\sA-Z\x80-\uFFFF]/;
 function normalizeLabel(label) {
   const hit = _normCache.get(label);
   if (hit !== undefined) return hit;
-  const out = label.replace(/\\([\[\]\\])/g, '$1').replace(/\s+/g, ' ').trim().toLowerCase().replace(/ß/g, 'ss').replace(/ẞ/g, 'ss');
+  // Fast path: no backslash, no whitespace, no uppercase, no non-ASCII
+  // (so no case folding or ß folding can apply) — already normalized.
+  let out;
+  if (!_normFastRe.test(label)) out = label;
+  else out = label.replace(/\\([\[\]\\])/g, '$1').replace(/\s+/g, ' ').trim().toLowerCase().replace(/ß/g, 'ss').replace(/ẞ/g, 'ss');
   if (_normCache.size > 4096) _normCache.clear();
   _normCache.set(label, out);
   return out;
@@ -234,7 +239,7 @@ function parseInlineLink(s, i) {
     }
     dest = s.slice(start, j);
   }
-  dest = dest.replace(/\\([!"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])/g, '$1');
+  dest = dest.indexOf('\\') === -1 ? dest : dest.replace(/\\([!"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])/g, '$1');
   let title = null;
   let k = j;
   while (k < n && (s[k] === ' ' || s[k] === '\t' || s[k] === '\n')) k++;
@@ -251,7 +256,8 @@ function parseInlineLink(s, i) {
       m++;
     }
     if (!ok) return null;
-    title = s.slice(tstart, m).replace(/\\([!"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])/g, '$1');
+    const rawTitle = s.slice(tstart, m);
+    title = rawTitle.indexOf('\\') === -1 ? rawTitle : rawTitle.replace(/\\([!"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])/g, '$1');
     k = m + 1;
     while (k < n && (s[k] === ' ' || s[k] === '\t' || s[k] === '\n')) k++;
   }
@@ -880,7 +886,7 @@ function tokenizeInline(s, refs) {
   // none, so check once instead of indexOf-ing from every word start
   const hasAt = s.indexOf('@') !== -1;
   const flushText = (end) => {
-    if (end > textStart) nodes.push({ t: 'text', s: s.slice(textStart, end), pos: textStart, end });
+    if (end > textStart) nodes.push({ t: 'text', s: s.slice(textStart, end), pos: textStart, end, next: null, prev: null, parent: null, removed: false, bOpen: null });
   };
   // is position p preceded by an odd run of backslashes?
   const isEscaped = (p) => {
@@ -929,7 +935,7 @@ function tokenizeInline(s, refs) {
       }
     }
     flushText(start);
-    nodes.push({ t: 'autolink', url: prefix ? prefix + url : 'mailto:' + url, text: prefix + url, pos: start, end: i + adv });
+    nodes.push({ t: 'autolink', url: prefix ? prefix + url : 'mailto:' + url, text: prefix + url, pos: start, end: i + adv, next: null, prev: null, parent: null, removed: false, bOpen: null });
     i += adv; textStart = i;
     return true;
   };
@@ -940,8 +946,8 @@ function tokenizeInline(s, refs) {
     switch (code) {
       case 92: { // backslash: only ASCII punctuation can be escaped
         const d = s[i + 1];
-        if (d === '\n') { flushText(i); nodes.push({ t: 'br', pos: i, end: i + 2 }); i += 2; while (i < n && (s[i] === ' ' || s[i] === '\t')) i++; textStart = i; continue; }
-        if (d !== undefined && d.charCodeAt(0) < 128 && PUNCT_T[d.charCodeAt(0)] === 1) { flushText(i); nodes.push({ t: 'text', s: d, pos: i, end: i + 2 }); i += 2; textStart = i; continue; }
+        if (d === '\n') { flushText(i); nodes.push({ t: 'br', pos: i, end: i + 2, next: null, prev: null, parent: null, removed: false, bOpen: null }); i += 2; while (i < n && (s[i] === ' ' || s[i] === '\t')) i++; textStart = i; continue; }
+        if (d !== undefined && d.charCodeAt(0) < 128 && PUNCT_T[d.charCodeAt(0)] === 1) { flushText(i); nodes.push({ t: 'text', s: d, pos: i, end: i + 2, next: null, prev: null, parent: null, removed: false, bOpen: null }); i += 2; textStart = i; continue; }
         i++;
         continue;
       }
@@ -1005,7 +1011,7 @@ function tokenizeInline(s, refs) {
           if (content.length >= 2 && content[0] === ' ' && content[content.length - 1] === ' ' && /[^ ]/.test(content)) {
             content = content.slice(1, -1);
           }
-          nodes.push({ t: 'code', s: content, pos: i, end: fend });
+          nodes.push({ t: 'code', s: content, pos: i, end: fend, next: null, prev: null, parent: null, removed: false, bOpen: null });
           i = fend; textStart = i; continue;
         }
         i = j; continue;
@@ -1035,21 +1041,21 @@ function tokenizeInline(s, refs) {
         if (c === '~' && len > 2) len = 2;
         if (canOpen || canClose) {
           flushText(i);
-          nodes.push({ t: 'delim', ch: c, len, canOpen, canClose, active: true, used: 0, pos: i, end: j });
+          nodes.push({ t: 'delim', ch: c, len, numDelims: len, rem: len, dead: false, pairCloser: null, pairUse: 0, pairTag: '', pairBPrime: 0, pairOpener: null, canOpen, canClose, active: true, used: 0, pos: i, end: j, next: null, prev: null, parent: null, removed: false, bOpen: null });
           i = j; textStart = i; continue;
         }
         i = j; continue;
       }
       case 91: { // [ bracket
         flushText(i);
-        nodes.push({ t: 'open', image: false, active: true, pos: i, end: i + 1 });
+        nodes.push({ t: 'open', image: false, active: true, pos: i, end: i + 1, next: null, prev: null, parent: null, removed: false, bOpen: null });
         openStack.push(i);
         i++; textStart = i; continue;
       }
       case 33: { // ! (only special as ![)
         if (s[i + 1] === '[') {
           flushText(i);
-          nodes.push({ t: 'open', image: true, active: true, pos: i, end: i + 2 });
+          nodes.push({ t: 'open', image: true, active: true, pos: i, end: i + 2, next: null, prev: null, parent: null, removed: false, bOpen: null });
           openStack.push(i);
           i += 2; textStart = i; continue;
         }
@@ -1058,7 +1064,7 @@ function tokenizeInline(s, refs) {
       }
       case 93: { // ] close bracket
         flushText(i);
-        nodes.push({ t: 'close', pos: i, end: i + 1 });
+        nodes.push({ t: 'close', pos: i, end: i + 1, next: null, prev: null, parent: null, removed: false, bOpen: null });
         if (openStack.length) openStack.pop();
         i++; textStart = i; continue;
       }
@@ -1069,14 +1075,14 @@ function tokenizeInline(s, refs) {
           const tag = s.slice(i, e);
           if (/^<a /i.test(tag)) _inLink = true;
           else if (/^<\/a>/i.test(tag)) _inLink = false;
-          nodes.push({ t: 'html', s: tag, pos: i, end: e }); i = e; textStart = i; continue;
+          nodes.push({ t: 'html', s: tag, pos: i, end: e, next: null, prev: null, parent: null, removed: false, bOpen: null }); i = e; textStart = i; continue;
         }
         const al = angleAutolink(s, i);
         if (al) {
           flushText(i);
           const raw = al.raw;
           const url = (al.email && !raw.includes(':')) ? 'mailto:' + raw : raw;
-          nodes.push({ t: 'autolink', url, text: raw, angle: true, pos: i, end: al.end });
+          nodes.push({ t: 'autolink', url, text: raw, angle: true, pos: i, end: al.end, next: null, prev: null, parent: null, removed: false, bOpen: null });
           i = al.end; textStart = i; continue;
         }
         i++;
@@ -1085,7 +1091,7 @@ function tokenizeInline(s, refs) {
       case 32: { // space: hard break is 2+ spaces + newline
         let j = i;
         while (s[j] === ' ') j++;
-        if (j - i >= 2 && s[j] === '\n') { flushText(i); nodes.push({ t: 'br', pos: i, end: j + 1 }); i = j + 1; while (i < n && (s[i] === ' ' || s[i] === '\t')) i++; textStart = i; continue; }
+        if (j - i >= 2 && s[j] === '\n') { flushText(i); nodes.push({ t: 'br', pos: i, end: j + 1, next: null, prev: null, parent: null, removed: false, bOpen: null }); i = j + 1; while (i < n && (s[i] === ' ' || s[i] === '\t')) i++; textStart = i; continue; }
         i++;
         continue;
       }
@@ -1101,7 +1107,7 @@ function tokenizeInline(s, refs) {
                 let u = trimExtendedUrl(s.slice(i, end));
                 const dc = linkDestCloseParen(s, i, refs);
                 if (dc !== -1 && i + u.length > dc) u = s.slice(i, dc);
-                if (u.length > 4) { flushText(i); nodes.push({ t: 'autolink', url: 'http://' + u, text: u, pos: i, end: i + u.length }); i += u.length; textStart = i; continue; }
+                if (u.length > 4) { flushText(i); nodes.push({ t: 'autolink', url: 'http://' + u, text: u, pos: i, end: i + u.length, next: null, prev: null, parent: null, removed: false, bOpen: null }); i += u.length; textStart = i; continue; }
               }
             }
           }
@@ -1129,7 +1135,7 @@ function tokenizeInline(s, refs) {
               let u = trimExtendedUrl(s.slice(i, end));
               const dc = linkDestCloseParen(s, i, refs);
               if (dc !== -1 && i + u.length > dc) u = s.slice(i, dc);
-              if (u.length > prefixLen) { flushText(i); nodes.push({ t: 'autolink', url: u, text: u, pos: i, end: i + u.length }); i += u.length; textStart = i; continue; }
+              if (u.length > prefixLen) { flushText(i); nodes.push({ t: 'autolink', url: u, text: u, pos: i, end: i + u.length, next: null, prev: null, parent: null, removed: false, bOpen: null }); i += u.length; textStart = i; continue; }
             }
           }
         }
@@ -1343,7 +1349,6 @@ function buildInlineTree(s, refs) {
     nodes[i].prev = nodes[i - 1] || null;
     nodes[i].parent = null;
     nodes[i].removed = false;
-    if (nodes[i].t === 'delim') nodes[i].numDelims = nodes[i].len;
   }
   let head = nodes[0];
   // Innermost still-open bracket before each node, in one linear pass
@@ -1454,7 +1459,7 @@ function buildInlineTree(s, refs) {
             const extra = Math.max(0, opener.pairBPrime - use - (cur.len - cur.numDelims));
             consumeC = use + extra;
             if (extra > 0) {
-              const lit = { t: 'text', s: cur.ch.repeat(extra), pos: cur.pos + use, end: cur.pos + consumeC, next: null, prev: null, parent: emNode, removed: false };
+              const lit = { t: 'text', s: cur.ch.repeat(extra), pos: cur.pos + use, end: cur.pos + consumeC, next: null, prev: null, parent: emNode, removed: false, bOpen: null };
               if (childTail) { childTail.next = lit; lit.prev = childTail; }
               else { emNode.childHead = lit; }
               childTail = lit;
