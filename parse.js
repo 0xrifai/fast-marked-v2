@@ -59,7 +59,9 @@ function isPunctCode(code) { return PUNCT_T[code] === 1; }
 // escaped. Matches marked: named entities pass through raw, numeric
 // references are decoded and the decoded character is escaped if needed.
 const TEXT_ESC_RE = /&#(?:\d{1,7}|[xX][0-9a-fA-F]{1,6});|&\w+;|[&<>"']/g;
+const TEXT_ESC_FAST_RE = /[&<>"']/;
 function escText(s) {
+  if (!TEXT_ESC_FAST_RE.test(s)) return s;
   return s.replace(TEXT_ESC_RE, (m) => {
     const c0 = m.charCodeAt(0);
     if (m.length === 1) {
@@ -1679,6 +1681,9 @@ function indentOf(t, startCol) {
 // Expand the tabs in a leading run of spaces/tabs to spaces, tracking
 // columns from `startCol`. Only the leading whitespace run is touched.
 function expandLeadingTabs(s, startCol) {
+  // No tab means the result is identical to the input (spaces copy 1:1
+  // and the remainder is appended unchanged).
+  if (s.indexOf('\t') === -1) return s;
   let col = startCol || 0, i = 0;
   let out = '';
   while (i < s.length && (s[i] === ' ' || s[i] === '\t')) {
@@ -2404,7 +2409,7 @@ function listMarkerInfo(t, col) {
   const after = t.slice(lead + marker.length);
   if (after !== '' && after[0] !== ' ' && after[0] !== '\t') return null;
   const markerEndCol = (col || 0) + lead + marker.length;
-  const afterMarker = t.slice(lead + marker.length);
+  const afterMarker = after;
   let w = 0;
   while (w < afterMarker.length && (afterMarker[w] === ' ' || afterMarker[w] === '\t')) w++;
   const wsRun = afterMarker.slice(0, w);
