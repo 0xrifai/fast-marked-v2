@@ -1229,8 +1229,7 @@ function scanStarOpener(op, s, refs, masked) {
       if (masked && !delimVisibleInMaskNode(cur, masked)) continue;
       if (firstStar) {
         firstStar = false;
-        const pre = s.slice(op.end, cur.pos);
-        if (/^[^_*]*?__[^_*]*?$/.test(pre) && /^[^_*]*?__/.test(s.slice(cur.end))) continue;
+        if (hasDoubleUnderscoreAlone(s, op.end, cur.pos) && startsWithDoubleUnderscore(s, cur.end)) continue;
       }
       const b = cur.bOpen;
       if (b && b.pos > op.pos && bracketWillLinkFrom(b, cur.pos, s, refs) !== null) continue;
@@ -1254,9 +1253,42 @@ function scanStarOpener(op, s, refs, masked) {
 }
 
 // A delim run is visible to the emStrong scan iff it is intact in the
-// masked text (not swallowed by a masked link/code/html span).
+// masked text (not swallowed by a masked link/code/html span). Checked
+// char by char — no slice/repeat allocation per call.
 function delimVisibleInMaskNode(node, masked) {
-  return masked.slice(node.pos, node.end) === node.ch.repeat(node.end - node.pos);
+  const ch = node.ch;
+  for (let p = node.pos; p < node.end; p++) {
+    if (masked[p] !== ch) return false;
+  }
+  return true;
+}
+
+// Does s[start..end) match /^[^_*]*?__[^_*]*?$/ — i.e. it holds exactly
+// one __ pair and no other * or _? (marked's closer-regex first
+// alternative, used to skip a single * between a __ pair.)
+function hasDoubleUnderscoreAlone(s, start, end) {
+  let us = 0, usPos = -1;
+  for (let p = start; p < end; p++) {
+    const c = s[p];
+    if (c === '*') return false;
+    if (c === '_') {
+      us++;
+      if (us === 1) usPos = p;
+      else if (us === 2 && p !== usPos + 1) return false;
+      else if (us > 2) return false;
+    }
+  }
+  return us === 2;
+}
+
+// Does s from `start` match /^[^_*]*?__/ — non-*_ chars then __?
+function startsWithDoubleUnderscore(s, start) {
+  for (let p = start; p < s.length; p++) {
+    const c = s[p];
+    if (c === '*') return false;
+    if (c === '_') return s[p + 1] === '_';
+  }
+  return false;
 }
 
 // Pre-pass: for each * opener, record the pairing marked's closer scan
@@ -1326,9 +1358,12 @@ function buildInlineTree(s, refs) {
         // before it are outside the bracket pair and cannot match a
         // closer inside it — but ONLY if that bracket will actually
         // form a link; if it will not, the delimiters may still pair.
+        // Every bracketStack entry precedes cur, so the innermost is
+        // the last valid entry — no full scan needed.
         let bracketPos = -1, bracketNode = null;
-        for (const b of bracketStack) {
-          if (!b.removed && !b.parent && b.active && b.pos < cur.pos && b.pos > bracketPos) { bracketPos = b.pos; bracketNode = b; }
+        for (let bi = bracketStack.length - 1; bi >= 0; bi--) {
+          const b = bracketStack[bi];
+          if (!b.removed && !b.parent && b.active) { bracketPos = b.pos; bracketNode = b; break; }
         }
         let bracketWillLink = false;
         if (bracketNode) {
