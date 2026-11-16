@@ -723,13 +723,14 @@ function maskReflinks(s, refs) {
       const afterLabel = matchBracketGroup(s, p, true);
       if (afterLabel !== -1) {
         const label = s.slice(p + 1, afterLabel - 1);
-        if (labelTextValid(label) && !labelContainsLink(s, p + 1, afterLabel - 1, refs)) {
-          const rl = parseRefLabel(s, afterLabel);
-          let end = -1;
-          if (rl && rl.label !== '' && shortcutLabelValid(rl.label) && refs.has(normalizeLabel(rl.label))) end = rl.end;
-          else if (rl && rl.label === '' && shortcutLabelValid(label) && refs.has(normalizeLabel(label))) end = rl.end;
-          else if (shortcutLabelValid(label) && refs.has(normalizeLabel(label)) && s[afterLabel] !== '(') end = afterLabel;
-          if (end !== -1 && s.slice(start, end).includes('`')) {
+        // Check the reference exists first: the label scans below are
+        // the expensive part, and most brackets are not defined refs.
+        const rl = parseRefLabel(s, afterLabel);
+        let end = -1;
+        if (rl && rl.label !== '' && shortcutLabelValid(rl.label) && refs.has(normalizeLabel(rl.label))) end = rl.end;
+        else if (rl && rl.label === '' && shortcutLabelValid(label) && refs.has(normalizeLabel(label))) end = rl.end;
+        else if (shortcutLabelValid(label) && refs.has(normalizeLabel(label)) && s[afterLabel] !== '(') end = afterLabel;
+        if (end !== -1 && labelTextValid(label) && !labelContainsLink(s, p + 1, afterLabel - 1, refs) && s.slice(start, end).includes('`')) {
             const span = s.slice(start, end);
             let masked = '';
             for (let q = 0; q < span.length; q++) {
@@ -740,7 +741,6 @@ function maskReflinks(s, refs) {
             i = end;
             continue;
           }
-        }
       }
       out += s.slice(start, p + 1);
       i = p + 1;
@@ -1305,8 +1305,15 @@ function buildInlineTree(s, refs) {
       else if (cur.t === 'close' && stack.length) stack.pop();
     }
   }
-  const masked = maskedTextFor(s, refs);
-  markDeadStarOpeners(head, s, refs, masked);
+  // The masked text is only consulted for delimiter pairing, so a
+  // paragraph with no delimiters never needs it (and the mask passes
+  // are a noticeable share of the whole run).
+  let hasDelim = false;
+  for (let cur = head; cur; cur = cur.next) {
+    if (cur.t === 'delim') { hasDelim = true; break; }
+  }
+  const masked = hasDelim ? maskedTextFor(s, refs) : null;
+  if (hasDelim) markDeadStarOpeners(head, s, refs, masked);
   const delimStack = [];
   const bracketStack = [];
   let cur = head;
