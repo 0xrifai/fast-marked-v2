@@ -1617,8 +1617,21 @@ function renderInlineList(head) {
   return out;
 }
 
+// Plain inline text: no backslash, backtick, emphasis, bracket, <, and
+// no bare-autolink trigger (www., http(s)://, ftp://, @). Such text
+// renders as its escaped self, with only hard breaks (2+ spaces + \n)
+// to handle. This covers many table cells and headings outright.
+const FAST_TRIGGER_RE = /[\\`*_~[<]|www\.|https?:\/\/|ftp:\/\/|@/i;
+const HARD_BR_RE = / {2,}\n[ \t]*/g;
 function parseInline(s, refs) {
   if (s === '') return '';
+  if (!FAST_TRIGGER_RE.test(s)) {
+    if (s.indexOf('  \n') === -1) return escText(s);
+    const parts = s.split(HARD_BR_RE);
+    let out = escText(parts[0]);
+    for (let k = 1; k < parts.length; k++) out += '<br>' + escText(parts[k]);
+    return out;
+  }
   return renderInlineList(buildInlineTree(s, refs));
 }
 
